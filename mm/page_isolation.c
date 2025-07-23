@@ -9,6 +9,7 @@
 #include <linux/memory.h>
 #include <linux/hugetlb.h>
 #include <linux/page_owner.h>
+#include <linux/page_pinner.h>
 #include <linux/migrate.h>
 #include "internal.h"
 
@@ -612,6 +613,16 @@ int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
 	int ret;
 
 	/*
+	 * Due to the deferred freeing of hugetlb folios, the hugepage folios may
+	 * not immediately release to the buddy system. This can cause PageBuddy()
+	 * to fail in __test_page_isolated_in_pageblock(). To ensure that the
+	 * hugetlb folios are properly released back to the buddy system, we
+	 * invoke the wait_for_freed_hugetlb_folios() function to wait for the
+	 * release to complete.
+	 */
+	wait_for_freed_hugetlb_folios();
+
+	/*
 	 * Note: pageblock_nr_pages != MAX_PAGE_ORDER. Then, chunks of free
 	 * pages are not aligned to pageblock_nr_pages.
 	 * Then we just check migratetype first.
@@ -637,6 +648,8 @@ int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
 
 out:
 	trace_test_pages_isolated(start_pfn, end_pfn, pfn);
+	if (pfn < end_pfn)
+		page_pinner_failure_detect(pfn_to_page(pfn));
 
 	return ret;
 }

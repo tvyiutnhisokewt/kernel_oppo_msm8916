@@ -34,6 +34,8 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/kmem.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
 
 enum slab_state slab_state;
 LIST_HEAD(slab_caches);
@@ -230,7 +232,7 @@ static struct kmem_cache *create_cache(const char *name,
 	if (args->use_freeptr_offset &&
 	    (args->freeptr_offset >= object_size ||
 	     !(flags & SLAB_TYPESAFE_BY_RCU) ||
-	     !IS_ALIGNED(args->freeptr_offset, sizeof(freeptr_t))))
+	     !IS_ALIGNED(args->freeptr_offset, __alignof__(freeptr_t))))
 		goto out;
 
 	err = -ENOMEM;
@@ -1076,6 +1078,7 @@ static void print_slabinfo_header(struct seq_file *m)
 	seq_puts(m, "# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab>");
 	seq_puts(m, " : tunables <limit> <batchcount> <sharedfactor>");
 	seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
+	trace_android_vh_print_slabinfo_header(m);
 	seq_putc(m, '\n');
 }
 
@@ -1110,6 +1113,7 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 		   sinfo.limit, sinfo.batchcount, sinfo.shared);
 	seq_printf(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
+	trace_android_vh_cache_show(m, &sinfo, s);
 	seq_putc(m, '\n');
 }
 

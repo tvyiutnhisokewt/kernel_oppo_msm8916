@@ -7,14 +7,16 @@
 
 use super::{lock::Backend, lock::Guard, LockClassKey};
 use crate::{
+    ffi::{c_int, c_long},
     init::PinInit,
     pin_init,
     str::CStr,
-    task::{MAX_SCHEDULE_TIMEOUT, TASK_INTERRUPTIBLE, TASK_NORMAL, TASK_UNINTERRUPTIBLE},
+    task::{
+        MAX_SCHEDULE_TIMEOUT, TASK_FREEZABLE, TASK_INTERRUPTIBLE, TASK_NORMAL, TASK_UNINTERRUPTIBLE,
+    },
     time::Jiffies,
     types::Opaque,
 };
-use core::ffi::{c_int, c_long};
 use core::marker::PhantomPinned;
 use core::ptr;
 use macros::pin_data;
@@ -70,8 +72,8 @@ pub use new_condvar;
 /// }
 ///
 /// /// Allocates a new boxed `Example`.
-/// fn new_example() -> Result<Pin<Box<Example>>> {
-///     Box::pin_init(pin_init!(Example {
+/// fn new_example() -> Result<Pin<KBox<Example>>> {
+///     KBox::pin_init(pin_init!(Example {
 ///         value <- new_mutex!(0),
 ///         value_changed <- new_condvar!(),
 ///     }), GFP_KERNEL)
@@ -93,7 +95,6 @@ pub struct CondVar {
 }
 
 // SAFETY: `CondVar` only uses a `struct wait_queue_head`, which is safe to use on any thread.
-#[allow(clippy::non_send_fields_in_send_ty)]
 unsafe impl Send for CondVar {}
 
 // SAFETY: `CondVar` only uses a `struct wait_queue_head`, which is safe to use on multiple threads
@@ -157,6 +158,25 @@ impl CondVar {
     #[must_use = "wait_interruptible returns if a signal is pending, so the caller must check the return value"]
     pub fn wait_interruptible<T: ?Sized, B: Backend>(&self, guard: &mut Guard<'_, T, B>) -> bool {
         self.wait_internal(TASK_INTERRUPTIBLE, guard, MAX_SCHEDULE_TIMEOUT);
+        crate::current!().signal_pending()
+    }
+
+    /// Releases the lock and waits for a notification in interruptible and freezable mode.
+    ///
+    /// The process is allowed to be frozen during this sleep. You must not hold any locks while
+    /// this operation is ongoing, and there is a lockdep assertion for this. Freezing a task that
+    /// holds a lock can trivially deadlock vs another task that needs that lock to complete before
+    /// it too can hit freezable.
+    #[must_use = "wait returns if a signal is pending, so the caller must check the return value"]
+    pub fn wait_interruptible_freezable<T: ?Sized, B: Backend>(
+        &self,
+        guard: &mut Guard<'_, T, B>,
+    ) -> bool {
+        self.wait_internal(
+            TASK_INTERRUPTIBLE | TASK_FREEZABLE,
+            guard,
+            MAX_SCHEDULE_TIMEOUT,
+        );
         crate::current!().signal_pending()
     }
 

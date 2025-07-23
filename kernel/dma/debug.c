@@ -1052,9 +1052,13 @@ static void check_unmap(struct dma_debug_entry *ref)
 	}
 
 	hash_bucket_del(entry);
-	dma_entry_free(entry);
-
 	put_hash_bucket(bucket, flags);
+
+	/*
+	 * Free the entry outside of bucket_lock to avoid ABBA deadlocks
+	 * between that and radix_lock.
+	 */
+	dma_entry_free(entry);
 }
 
 static void check_for_stack(struct device *dev,
@@ -1155,10 +1159,11 @@ static void check_sync(struct device *dev,
 				dir2name[entry->direction],
 				dir2name[ref->direction]);
 
+	/* sg list count can be less than map count when partial cache sync */
 	if (ref->sg_call_ents && ref->type == dma_debug_sg &&
-	    ref->sg_call_ents != entry->sg_call_ents) {
+	    ref->sg_call_ents > entry->sg_call_ents) {
 		err_printk(ref->dev, entry, "device driver syncs "
-			   "DMA sg list with different entry count "
+			   "DMA sg list count larger than map count "
 			   "[map count=%d] [sync count=%d]\n",
 			   entry->sg_call_ents, ref->sg_call_ents);
 	}

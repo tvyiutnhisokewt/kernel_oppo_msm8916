@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <stdlib.h>
 
 #include <hashtable.h>
 #include <list.h>
@@ -32,8 +33,14 @@ static bool module_enabled;
 static bool modversions;
 /* Is CONFIG_MODULE_SRCVERSION_ALL set? */
 static bool all_versions;
+/* Is CONFIG_BASIC_MODVERSIONS set? */
+static bool basic_modversions;
+/* Is CONFIG_EXTENDED_MODVERSIONS set? */
+static bool extended_modversions;
 /* If we are modposting external module set to 1 */
 static bool external_module;
+#define MODULE_SCMVERSION_SIZE 64
+static char module_scmversion[MODULE_SCMVERSION_SIZE];
 /* Only warn about unresolved symbols */
 static bool warn_unresolved;
 
@@ -53,6 +60,9 @@ static bool extra_warn;
 
 bool target_is_big_endian;
 bool host_is_big_endian;
+
+static unsigned int nr_module_exported_symbols;
+static unsigned int nr_white_list_symbols;
 
 /*
  * Cut off the warnings when there are too many. This typically occurs when
@@ -91,6 +101,11 @@ static inline bool strends(const char *str, const char *postfix)
 		return false;
 
 	return strcmp(str + strlen(str) - strlen(postfix), postfix) == 0;
+}
+
+static int symbol_cmp(const void *a, const void *b)
+{
+	return strcmp(*(const char **)a, *(const char **)b);
 }
 
 char *read_text_file(const char *filename)
@@ -359,6 +374,9 @@ static struct symbol *sym_add_exported(const char *name, struct module *mod,
 	s->namespace = xstrdup(namespace);
 	list_add_tail(&s->list, &mod->exported_symbols);
 	hash_add_symbol(s);
+	if (!mod->is_vmlinux && !mod->from_dump) {
+		++nr_module_exported_symbols;
+	}
 
 	return s;
 }
@@ -756,6 +774,7 @@ static void check_section(const char *modname, struct elf_info *elf,
 	const char *sec = sech_name(elf, sechdr);
 
 	if (sechdr->sh_type == SHT_PROGBITS &&
+	    sechdr->sh_size > 0 &&
 	    !(sechdr->sh_flags & SHF_ALLOC) &&
 	    !match(sec, section_white_list)) {
 		warn("%s (%s): unexpected non-allocatable section.\n"
@@ -785,7 +804,7 @@ static void check_section(const char *modname, struct elf_info *elf,
 		".ltext", ".ltext.*"
 #define OTHER_TEXT_SECTIONS ".ref.text", ".head.text", ".spinlock.text", \
 		".fixup", ".entry.text", ".exception.text", \
-		".coldtext", ".softirqentry.text"
+		".coldtext", ".softirqentry.text", ".irqentry.text"
 
 #define ALL_TEXT_SECTIONS  ".init.text", ".exit.text", \
 		TEXT_SECTIONS, OTHER_TEXT_SECTIONS
@@ -1719,18 +1738,29 @@ static void check_exports(struct module *mod)
 	}
 }
 
-static void handle_white_list_exports(const char *white_list)
+struct permitted_symbol {
+	struct list_head list;
+	const char *name;
+};
+
+static void handle_white_list_exports(const char *white_list,
+				      struct list_head *permitted_symbols)
 {
 	char *buf, *p, *name;
-
+	struct permitted_symbol *ps;
 	buf = read_text_file(white_list);
 	p = buf;
 
 	while ((name = strsep(&p, "\n"))) {
 		struct symbol *sym = find_symbol(name);
 
-		if (sym)
+		if (sym) {
 			sym->used = true;
+			ps = xmalloc(sizeof(*ps));
+			ps->name = sym->name;
+			list_add_tail(&ps->list, permitted_symbols);
+			++nr_white_list_symbols;
+		}
 	}
 
 	free(buf);
@@ -1775,6 +1805,9 @@ static void add_header(struct buffer *b, struct module *mod)
 	if (!external_module)
 		buf_printf(b, "\nMODULE_INFO(intree, \"Y\");\n");
 
+	if (module_scmversion[0] != '\0')
+		buf_printf(b, "\nMODULE_INFO(scmversion, \"%s\");\n", module_scmversion);
+
 	if (strstarts(mod->name, "drivers/staging"))
 		buf_printf(b, "\nMODULE_INFO(staging, \"Y\");\n");
 
@@ -1818,13 +1851,56 @@ static void add_exported_symbols(struct buffer *buf, struct module *mod)
 }
 
 /**
+ * Record CRCs for unresolved symbols, supporting long names
+ */
+static void add_extended_versions(struct buffer *b, struct module *mod)
+{
+	struct symbol *s;
+
+	if (!extended_modversions)
+		return;
+
+	buf_printf(b, "\n");
+	buf_printf(b, "static const u32 ____version_ext_crcs[]\n");
+	buf_printf(b, "__used __section(\"__version_ext_crcs\") = {\n");
+	list_for_each_entry(s, &mod->unresolved_symbols, list) {
+		if (!s->module)
+			continue;
+		if (!s->crc_valid) {
+			warn("\"%s\" [%s.ko] has no CRC!\n",
+				s->name, mod->name);
+			continue;
+		}
+		buf_printf(b, "\t0x%08x,\n", s->crc);
+	}
+	buf_printf(b, "};\n");
+
+	buf_printf(b, "static const char ____version_ext_names[]\n");
+	buf_printf(b, "__used __section(\"__version_ext_names\") =\n");
+	list_for_each_entry(s, &mod->unresolved_symbols, list) {
+		if (!s->module)
+			continue;
+		if (!s->crc_valid)
+			/*
+			 * We already warned on this when producing the crc
+			 * table.
+			 * We need to skip its name too, as the indexes in
+			 * both tables need to align.
+			 */
+			continue;
+		buf_printf(b, "\t\"%s\\0\"\n", s->name);
+	}
+	buf_printf(b, ";\n");
+}
+
+/**
  * Record CRCs for unresolved symbols
  **/
 static void add_versions(struct buffer *b, struct module *mod)
 {
 	struct symbol *s;
 
-	if (!modversions)
+	if (!basic_modversions)
 		return;
 
 	buf_printf(b, "\n");
@@ -1840,11 +1916,16 @@ static void add_versions(struct buffer *b, struct module *mod)
 			continue;
 		}
 		if (strlen(s->name) >= MODULE_NAME_LEN) {
-			error("too long symbol \"%s\" [%s.ko]\n",
-			      s->name, mod->name);
-			break;
+			if (extended_modversions) {
+				/* this symbol will only be in the extended info */
+				continue;
+			} else {
+				error("too long symbol \"%s\" [%s.ko]\n",
+				      s->name, mod->name);
+				break;
+			}
 		}
-		buf_printf(b, "\t{ %#8x, \"%s\" },\n",
+		buf_printf(b, "\t{ 0x%08x, \"%s\" },\n",
 			   s->crc, s->name);
 	}
 
@@ -1972,6 +2053,7 @@ static void write_mod_c_file(struct module *mod)
 	add_header(&buf, mod);
 	add_exported_symbols(&buf, mod);
 	add_versions(&buf, mod);
+	add_extended_versions(&buf, mod);
 	add_depends(&buf, mod);
 	add_moddevtable(&buf, mod);
 	add_srcversion(&buf, mod);
@@ -2120,17 +2202,90 @@ static void check_host_endian(void)
 	}
 }
 
+static void handle_protected_modules_list(const char *fname)
+{
+	char *buf, *p, *name;
+
+	buf = read_text_file(fname);
+	p = buf;
+
+	while ((name = strsep(&p, "\n"))) {
+		struct module *mod = find_module(name);
+
+		if (mod)
+			mod->is_protected = true;
+	}
+
+	free(buf);
+}
+
+static void write_protected_exports_c_file(void)
+{
+	const char* symbols[nr_module_exported_symbols];
+	unsigned int symbols_size = 0;
+	unsigned int i;
+	struct module *mod;
+	struct symbol *sym;
+	struct buffer buf = {};
+
+	list_for_each_entry(mod, &modules, list) {
+		if (mod->is_vmlinux || mod->from_dump || !mod->is_protected)
+			continue;
+
+		list_for_each_entry(sym, &mod->exported_symbols, list) {
+			symbols[symbols_size++] = sym->name;
+		}
+	}
+	qsort(symbols, symbols_size, sizeof(const char*), symbol_cmp);
+
+	buf_printf(&buf, "#include \"../kernel/module/internal.h\"\n\n");
+	buf_printf(&buf, "size_t protected_symbol_exports_count = %d;\n\n", symbols_size);
+	buf_printf(&buf, "const char *const protected_symbol_exports[] = {\n");
+	for (i=0; i<symbols_size; ++i) {
+		buf_printf(&buf, "\t\"%s\",\n", symbols[i]);
+	}
+	buf_printf(&buf, "};\n");
+	write_if_changed(&buf, ".vmlinux.protected-exports.c");
+	free(buf.p);
+}
+
+static void write_permitted_imports_c_file(struct list_head *permitted_symbols)
+{
+	struct permitted_symbol *ps, *ps2;
+	const char *symbols[nr_white_list_symbols];
+	unsigned int i = 0;
+	struct buffer buf = {};
+
+	list_for_each_entry_safe(ps, ps2, permitted_symbols, list) {
+		symbols[i++] = ps->name;
+		list_del(&ps->list);
+		free(ps);
+	}
+	qsort(symbols, nr_white_list_symbols, sizeof(const char *), symbol_cmp);
+
+	buf_printf(&buf, "#include \"../kernel/module/internal.h\"\n\n");
+	buf_printf(&buf, "size_t permitted_symbol_imports_count = %d;\n\n", nr_white_list_symbols);
+	buf_printf(&buf, "const char *const permitted_symbol_imports[] = {\n");
+	for (i=0; i<nr_white_list_symbols; ++i) {
+		buf_printf(&buf, "\t\"%s\",\n", symbols[i]);
+	}
+	buf_printf(&buf, "};\n");
+	write_if_changed(&buf, ".vmlinux.permitted-imports.c");
+	free(buf.p);
+}
+
 int main(int argc, char **argv)
 {
 	struct module *mod;
 	char *missing_namespace_deps = NULL;
 	char *unused_exports_white_list = NULL;
+	char *protected_modules_list = NULL;
 	char *dump_write = NULL, *files_source = NULL;
 	int opt;
 	LIST_HEAD(dump_lists);
 	struct dump_list *dl, *dl2;
 
-	while ((opt = getopt(argc, argv, "ei:MmnT:to:au:WwENd:")) != -1) {
+	while ((opt = getopt(argc, argv, "ei:MmnT:to:au:WwENd:v:xbp:")) != -1) {
 		switch (opt) {
 		case 'e':
 			external_module = true;
@@ -2179,6 +2334,18 @@ int main(int argc, char **argv)
 		case 'd':
 			missing_namespace_deps = optarg;
 			break;
+		case 'v':
+			strncpy(module_scmversion, optarg, sizeof(module_scmversion) - 1);
+			break;
+		case 'b':
+			basic_modversions = true;
+			break;
+		case 'x':
+			extended_modversions = true;
+			break;
+		case 'p':
+			protected_modules_list = optarg;
+			break;
 		default:
 			exit(1);
 		}
@@ -2206,8 +2373,13 @@ int main(int argc, char **argv)
 		check_exports(mod);
 	}
 
-	if (unused_exports_white_list)
-		handle_white_list_exports(unused_exports_white_list);
+	if (trim_unused_exports) {
+		LIST_HEAD(permitted_imports);
+		if (unused_exports_white_list)
+			handle_white_list_exports(unused_exports_white_list,
+						  &permitted_imports);
+		write_permitted_imports_c_file(&permitted_imports);
+	}
 
 	list_for_each_entry(mod, &modules, list) {
 		if (mod->from_dump)
@@ -2231,6 +2403,11 @@ int main(int argc, char **argv)
 	if (nr_unresolved > MAX_UNRESOLVED_REPORTS)
 		warn("suppressed %u unresolved symbol warnings because there were too many)\n",
 		     nr_unresolved - MAX_UNRESOLVED_REPORTS);
+
+	if (protected_modules_list) {
+		handle_protected_modules_list(protected_modules_list);
+		write_protected_exports_c_file();
+	}
 
 	return error_occurred ? 1 : 0;
 }

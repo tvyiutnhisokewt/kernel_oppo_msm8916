@@ -49,6 +49,10 @@
 
 #include <trace/events/migrate.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+#include <trace/hooks/vmscan.h>
+
 #include "internal.h"
 
 bool isolate_movable_page(struct page *page, isolate_mode_t mode)
@@ -170,6 +174,7 @@ void putback_movable_pages(struct list_head *l)
 		}
 	}
 }
+EXPORT_SYMBOL_GPL(putback_movable_pages);
 
 /* Must be called with an elevated refcount on the non-hugetlb folio */
 bool isolate_folio_to_list(struct folio *folio, struct list_head *list)
@@ -526,15 +531,13 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 	if (folio_test_anon(folio) && folio_test_large(folio))
 		mod_mthp_stat(folio_order(folio), MTHP_STAT_NR_ANON, 1);
 	folio_ref_add(newfolio, nr); /* add cache reference */
-	if (folio_test_swapbacked(folio)) {
+	if (folio_test_swapbacked(folio))
 		__folio_set_swapbacked(newfolio);
-		if (folio_test_swapcache(folio)) {
-			folio_set_swapcache(newfolio);
-			newfolio->private = folio_get_private(folio);
-		}
+	if (folio_test_swapcache(folio)) {
+		folio_set_swapcache(newfolio);
+		newfolio->private = folio_get_private(folio);
 		entries = nr;
 	} else {
-		VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
 		entries = 1;
 	}
 
@@ -686,6 +689,8 @@ void folio_migrate_flags(struct folio *newfolio, struct folio *folio)
 	if (folio_test_mappedtodisk(folio))
 		folio_set_mappedtodisk(newfolio);
 
+	trace_android_vh_look_around_migrate_folio(folio, newfolio);
+
 	/* Move dirty on pages not done by folio_migrate_mapping() */
 	if (folio_test_dirty(folio))
 		folio_set_dirty(newfolio);
@@ -695,6 +700,7 @@ void folio_migrate_flags(struct folio *newfolio, struct folio *folio)
 	if (folio_test_idle(folio))
 		folio_set_idle(newfolio);
 
+	folio_migrate_refs(newfolio, folio);
 	/*
 	 * Copy NUMA information to the new page, to prevent over-eager
 	 * future migrations of this same page.
@@ -744,7 +750,7 @@ void folio_migrate_flags(struct folio *newfolio, struct folio *folio)
 		folio_set_readahead(newfolio);
 
 	folio_copy_owner(newfolio, folio);
-	pgalloc_tag_copy(newfolio, folio);
+	pgalloc_tag_swap(newfolio, folio);
 
 	mem_cgroup_migrate(folio, newfolio);
 }
@@ -2122,6 +2128,7 @@ out:
 
 	return rc_gather;
 }
+EXPORT_SYMBOL_GPL(migrate_pages);
 
 struct folio *alloc_migration_target(struct folio *src, unsigned long private)
 {

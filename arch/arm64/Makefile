@@ -48,7 +48,11 @@ KBUILD_CFLAGS	+= $(CC_FLAGS_NO_FPU) \
 KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
 KBUILD_AFLAGS	+= $(compat_vdso)
 
+ifeq ($(call test-ge, $(CONFIG_RUSTC_VERSION), 108500),y)
+KBUILD_RUSTFLAGS += --target=aarch64-unknown-none-softfloat
+else
 KBUILD_RUSTFLAGS += --target=aarch64-unknown-none -Ctarget-feature="-neon"
+endif
 
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
@@ -71,7 +75,7 @@ stack_protector_prepare: prepare0
 				-mstack-protector-guard-reg=sp_el0	  \
 				-mstack-protector-guard-offset=$(shell	  \
 			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}' \
-					include/generated/asm-offsets.h))
+				$(objtree)/include/generated/asm-offsets.h))
 endif
 
 ifeq ($(CONFIG_ARM64_BTI_KERNEL),y)
@@ -174,7 +178,10 @@ else
 KBUILD_IMAGE	:= $(boot)/vmlinuz.efi
 endif
 
+# Don't compile Image in mixed build with "all" target
+ifndef KBUILD_MIXED_TREE
 all:	$(notdir $(KBUILD_IMAGE))
+endif
 
 image.fit: dtbs
 
@@ -206,6 +213,11 @@ ifeq ($(CONFIG_ARM64_USE_LSE_ATOMICS),y)
   ifneq ($(CONFIG_ARM64_LSE_ATOMICS),y)
 	@echo "warning: LSE atomics not supported by binutils" >&2
   endif
+endif
+
+ifeq ($(CONFIG_KVM),y)
+archscripts:
+	$(Q)$(MAKE) $(build)=arch/arm64/tools gen-hyprel
 endif
 
 ifeq ($(KBUILD_EXTMOD),)

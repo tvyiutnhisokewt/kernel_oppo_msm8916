@@ -29,6 +29,7 @@
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
+#include <linux/cleancache.h>
 #include "internal.h"
 
 /*
@@ -277,6 +278,12 @@ static struct bio *do_mpage_readpage(struct mpage_readpage_args *args)
 		}
 	} else if (fully_mapped) {
 		folio_set_mappedtodisk(folio);
+	}
+
+	if (fully_mapped && blocks_per_page == 1 && !folio_test_uptodate(folio) &&
+	    cleancache_get_page(&folio->page) == 0) {
+		folio_mark_uptodate(folio);
+		goto confused;
 	}
 
 	/*
@@ -606,7 +613,7 @@ alloc_new:
 	 * the confused fail path above (OOM) will be very confused when
 	 * it finds all bh marked clean (i.e. it will not write anything)
 	 */
-	wbc_account_cgroup_owner(wbc, &folio->page, folio_size(folio));
+	wbc_account_cgroup_owner(wbc, folio, folio_size(folio));
 	length = first_unmapped << blkbits;
 	if (!bio_add_folio(bio, folio, length, 0)) {
 		bio = mpage_bio_submit_write(bio);

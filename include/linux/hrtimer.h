@@ -19,6 +19,7 @@
 #include <linux/percpu-defs.h>
 #include <linux/rbtree.h>
 #include <linux/timer.h>
+#include <linux/android_kabi.h>
 
 /*
  * Mode arguments of xxx_hrtimer functions:
@@ -379,6 +380,7 @@ extern void __init hrtimers_init(void);
 extern void sysrq_timer_list_show(void);
 
 int hrtimers_prepare_cpu(unsigned int cpu);
+int hrtimers_cpu_starting(unsigned int cpu);
 #ifdef CONFIG_HOTPLUG_CPU
 int hrtimers_cpu_dying(unsigned int cpu);
 #else

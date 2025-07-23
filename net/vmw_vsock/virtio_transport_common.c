@@ -26,6 +26,9 @@
 /* Threshold for detecting small packets to copy */
 #define GOOD_COPY_LEN  128
 
+static void virtio_transport_cancel_close_work(struct vsock_sock *vsk,
+					       bool cancel_timeout);
+
 static const struct virtio_transport *
 virtio_transport_get_ops(struct vsock_sock *vsk)
 {
@@ -107,7 +110,8 @@ static int virtio_transport_fill_skb(struct sk_buff *skb,
 					       &info->msg->msg_iter,
 					       len);
 
-	return memcpy_from_msg(skb_put(skb, len), info->msg, len);
+	virtio_vsock_skb_put(skb, len);
+	return skb_copy_datagram_from_iter(skb, 0, &info->msg->msg_iter, len);
 }
 
 static void virtio_transport_init_hdr(struct sk_buff *skb,
@@ -325,7 +329,24 @@ out:
 static int virtio_transport_send_pkt_info(struct vsock_sock *vsk,
 					  struct virtio_vsock_pkt_info *info)
 {
-	u32 max_skb_len = VIRTIO_VSOCK_MAX_PKT_BUF_SIZE;
+	/* ANDROID:
+	 *
+	 * Older host kernels (including the 5.10-based images used by
+	 * Cuttlefish) only support linear SKBs on the RX path.
+	 * Consequently, if we transmit a VIRTIO_VSOCK_MAX_PKT_BUF_SIZE
+	 * packet, the host allocation can fail and the packet will be
+	 * silently dropped.
+	 *
+	 * As a nasty workaround, limit the entire SKB to ~28KiB, which
+	 * allows for 4KiB of SKB wiggle room whilst keeping the
+	 * allocation below PAGE_ALLOC_COSTLY_ORDER.
+	 *
+	 * This can be removed when all supported host kernels have
+	 * support for non-linear RX buffers introduced by Change-Id
+	 * I4212a8daf9f19b5bbffc06ce93338c823de7bb19.
+	 */
+	u32 max_skb_len = min_t(u32, VIRTIO_VSOCK_MAX_PKT_BUF_SIZE,
+				SKB_WITH_OVERHEAD(SZ_32K - VIRTIO_VSOCK_SKB_HEADROOM) - SZ_4K);
 	u32 src_cid, src_port, dst_cid, dst_port;
 	const struct virtio_transport *t_ops;
 	struct virtio_vsock_sock *vvs;
@@ -370,7 +391,7 @@ static int virtio_transport_send_pkt_info(struct vsock_sock *vsk,
 			can_zcopy = virtio_transport_can_zcopy(t_ops, info, pkt_len);
 
 		if (can_zcopy)
-			max_skb_len = min_t(u32, VIRTIO_VSOCK_MAX_PKT_BUF_SIZE,
+			max_skb_len = min_t(u32, max_skb_len,
 					    (MAX_SKB_FRAGS * PAGE_SIZE));
 	}
 
@@ -1109,6 +1130,8 @@ void virtio_transport_destruct(struct vsock_sock *vsk)
 {
 	struct virtio_vsock_sock *vvs = vsk->trans;
 
+	virtio_transport_cancel_close_work(vsk, true);
+
 	kfree(vvs);
 	vsk->trans = NULL;
 }
@@ -1204,6 +1227,22 @@ static void virtio_transport_wait_close(struct sock *sk, long timeout)
 	}
 }
 
+static void virtio_transport_cancel_close_work(struct vsock_sock *vsk,
+					       bool cancel_timeout)
+{
+	struct sock *sk = sk_vsock(vsk);
+
+	if (vsk->close_work_scheduled &&
+	    (!cancel_timeout || cancel_delayed_work(&vsk->close_work))) {
+		vsk->close_work_scheduled = false;
+
+		virtio_transport_remove_sock(vsk);
+
+		/* Release refcnt obtained when we scheduled the timeout */
+		sock_put(sk);
+	}
+}
+
 static void virtio_transport_do_close(struct vsock_sock *vsk,
 				      bool cancel_timeout)
 {
@@ -1215,15 +1254,7 @@ static void virtio_transport_do_close(struct vsock_sock *vsk,
 		sk->sk_state = TCP_CLOSING;
 	sk->sk_state_change(sk);
 
-	if (vsk->close_work_scheduled &&
-	    (!cancel_timeout || cancel_delayed_work(&vsk->close_work))) {
-		vsk->close_work_scheduled = false;
-
-		virtio_transport_remove_sock(vsk);
-
-		/* Release refcnt obtained when we scheduled the timeout */
-		sock_put(sk);
-	}
+	virtio_transport_cancel_close_work(vsk, cancel_timeout);
 }
 
 static void virtio_transport_close_timeout(struct work_struct *work)
@@ -1628,8 +1659,11 @@ void virtio_transport_recv_pkt(struct virtio_transport *t,
 
 	lock_sock(sk);
 
-	/* Check if sk has been closed before lock_sock */
-	if (sock_flag(sk, SOCK_DONE)) {
+	/* Check if sk has been closed or assigned to another transport before
+	 * lock_sock (note: listener sockets are not assigned to any transport)
+	 */
+	if (sock_flag(sk, SOCK_DONE) ||
+	    (sk->sk_state != TCP_LISTEN && vsk->transport != &t->transport)) {
 		(void)virtio_transport_reset_no_sock(t, skb);
 		release_sock(sk);
 		sock_put(sk);

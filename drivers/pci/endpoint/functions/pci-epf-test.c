@@ -251,7 +251,7 @@ static int pci_epf_test_init_dma_chan(struct pci_epf_test *epf_test)
 
 fail_back_rx:
 	dma_release_channel(epf_test->dma_chan_rx);
-	epf_test->dma_chan_tx = NULL;
+	epf_test->dma_chan_rx = NULL;
 
 fail_back_tx:
 	dma_cap_zero(mask);
@@ -361,8 +361,8 @@ static void pci_epf_test_copy(struct pci_epf_test *epf_test,
 
 	ktime_get_ts64(&start);
 	if (reg->flags & FLAG_USE_DMA) {
-		if (epf_test->dma_private) {
-			dev_err(dev, "Cannot transfer data using DMA\n");
+		if (!dma_has_cap(DMA_MEMCPY, epf_test->dma_chan_tx->device->cap_mask)) {
+			dev_err(dev, "DMA controller doesn't support MEMCPY\n");
 			ret = -EINVAL;
 			goto err_map_addr;
 		}
@@ -617,7 +617,7 @@ static void pci_epf_test_raise_irq(struct pci_epf_test *epf_test,
 	case IRQ_TYPE_MSIX:
 		count = pci_epc_get_msix(epc, epf->func_no, epf->vfunc_no);
 		if (reg->irq_number > count || count <= 0) {
-			dev_err(dev, "Invalid MSIX IRQ number %d / %d\n",
+			dev_err(dev, "Invalid MSI-X IRQ number %d / %d\n",
 				reg->irq_number, count);
 			return;
 		}

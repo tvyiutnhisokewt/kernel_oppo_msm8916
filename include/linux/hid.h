@@ -27,6 +27,7 @@
 #include <linux/power_supply.h>
 #include <uapi/linux/hid.h>
 #include <linux/hid_bpf.h>
+#include <linux/android_kabi.h>
 
 /*
  * We parse each description item into this structure. Short items data
@@ -218,6 +219,7 @@ struct hid_item {
 #define HID_GD_DOWN		0x00010091
 #define HID_GD_RIGHT		0x00010092
 #define HID_GD_LEFT		0x00010093
+#define HID_GD_DO_NOT_DISTURB	0x0001009b
 /* Microsoft Win8 Wireless Radio Controls CA usage codes */
 #define HID_GD_RFKILL_BTN	0x000100c6
 #define HID_GD_RFKILL_LED	0x000100c7
@@ -359,6 +361,7 @@ struct hid_item {
  * | @HID_QUIRK_NO_OUTPUT_REPORTS_ON_INTR_EP:
  * | @HID_QUIRK_HAVE_SPECIAL_DRIVER:
  * | @HID_QUIRK_INCREMENT_USAGE_ON_DUPLICATE:
+ * | @HID_QUIRK_IGNORE_SPECIAL_DRIVER
  * | @HID_QUIRK_FULLSPEED_INTERVAL:
  * | @HID_QUIRK_NO_INIT_REPORTS:
  * | @HID_QUIRK_NO_IGNORE:
@@ -384,6 +387,7 @@ struct hid_item {
 #define HID_QUIRK_HAVE_SPECIAL_DRIVER		BIT(19)
 #define HID_QUIRK_INCREMENT_USAGE_ON_DUPLICATE	BIT(20)
 #define HID_QUIRK_NOINVERT			BIT(21)
+#define HID_QUIRK_IGNORE_SPECIAL_DRIVER		BIT(22)
 #define HID_QUIRK_FULLSPEED_INTERVAL		BIT(28)
 #define HID_QUIRK_NO_INIT_REPORTS		BIT(29)
 #define HID_QUIRK_NO_IGNORE			BIT(30)
@@ -474,9 +478,9 @@ struct hid_usage {
 	__s8	  wheel_factor;		/* 120/resolution_multiplier */
 	__u16     code;			/* input driver code */
 	__u8      type;			/* input driver type */
-	__s16	  hat_min;		/* hat switch fun */
-	__s16	  hat_max;		/* ditto */
-	__s16	  hat_dir;		/* ditto */
+	__s8	  hat_min;		/* hat switch fun */
+	__s8	  hat_max;		/* ditto */
+	__s8	  hat_dir;		/* ditto */
 	__s16	  wheel_accumulated;	/* hi-res wheel */
 };
 
@@ -538,6 +542,7 @@ struct hid_report {
 	/* tool related state */
 	bool tool_active;				/* whether the current tool is active */
 	unsigned int tool;				/* BTN_TOOL_* */
+	ANDROID_KABI_RESERVE(1);
 };
 
 #define HID_MAX_IDS 256
@@ -582,6 +587,8 @@ struct hid_input {
 	struct list_head reports;	/* the list of reports */
 	unsigned int application;	/* application usage for this input */
 	bool registered;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 enum hid_type {
@@ -686,6 +693,9 @@ struct hid_device {							/* device report descriptor */
 #ifdef CONFIG_HID_BPF
 	struct hid_bpf bpf;						/* hid-bpf data */
 #endif /* CONFIG_HID_BPF */
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 void hiddev_free(struct kref *ref);
@@ -720,6 +730,7 @@ struct hid_parser {
 	unsigned int          collection_stack_size;
 	struct hid_device    *device;
 	unsigned int          scan_flags;
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct hid_class_descriptor {
@@ -841,6 +852,9 @@ struct hid_driver {
 	int (*resume)(struct hid_device *hdev);
 	int (*reset_resume)(struct hid_device *hdev);
 
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
 /* private: */
 	struct device_driver driver;
 };
@@ -891,6 +905,9 @@ struct hid_ll_driver {
 	bool (*may_wakeup)(struct hid_device *hdev);
 
 	unsigned int max_buffer_size;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 extern bool hid_is_usb(const struct hid_device *hdev);
@@ -1217,12 +1234,6 @@ int hid_report_raw_event(struct hid_device *hid, enum hid_report_type type, u8 *
 unsigned long hid_lookup_quirk(const struct hid_device *hdev);
 int hid_quirks_init(char **quirks_param, __u16 bus, int count);
 void hid_quirks_exit(__u16 bus);
-
-#ifdef CONFIG_HID_PID
-int hid_pidff_init(struct hid_device *hid);
-#else
-#define hid_pidff_init NULL
-#endif
 
 #define dbg_hid(fmt, ...) pr_debug("%s: " fmt, __FILE__, ##__VA_ARGS__)
 

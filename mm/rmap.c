@@ -82,6 +82,11 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/tlb.h>
 #include <trace/events/migrate.h>
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
 
 #include "internal.h"
 
@@ -886,6 +891,7 @@ static bool folio_referenced_one(struct folio *folio,
 		}
 
 		if (lru_gen_enabled() && pvmw.pte) {
+			trace_android_vh_look_around(&pvmw, folio, vma, &referenced);
 			if (lru_gen_look_around(&pvmw))
 				referenced++;
 		} else if (pvmw.pte) {
@@ -1010,6 +1016,7 @@ int folio_referenced(struct folio *folio, int is_locked,
 
 	return rwc.contended ? -1 : pra.referenced;
 }
+EXPORT_SYMBOL_GPL(folio_referenced);
 
 static int page_vma_mkclean_one(struct page_vma_mapped_walk *pvmw)
 {
@@ -1465,6 +1472,7 @@ void folio_add_new_anon_rmap(struct folio *folio, struct vm_area_struct *vma,
 
 	__folio_mod_stat(folio, nr, nr_pmdmapped);
 	mod_mthp_stat(folio_order(folio), MTHP_STAT_NR_ANON, 1);
+	trace_android_vh_page_add_new_anon_rmap(&folio->page, vma, address);
 }
 
 static __always_inline void __folio_add_file_rmap(struct folio *folio,
@@ -1951,6 +1959,7 @@ walk_done:
 	}
 
 	mmu_notifier_invalidate_range_end(&range);
+	trace_android_vh_try_to_unmap_one(folio, vma, address, arg, ret);
 
 	return ret;
 }
@@ -2488,7 +2497,7 @@ static bool folio_make_device_exclusive(struct folio *folio,
 	 * Restrict to anonymous folios for now to avoid potential writeback
 	 * issues.
 	 */
-	if (!folio_test_anon(folio))
+	if (!folio_test_anon(folio) || folio_test_hugetlb(folio))
 		return false;
 
 	rmap_walk(folio, &rwc);

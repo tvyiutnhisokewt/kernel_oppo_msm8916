@@ -16,6 +16,7 @@
 #include <linux/export.h>
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
+#include <linux/page_size_compat.h>
 #include <linux/splice.h>
 #include <linux/compat.h>
 #include <linux/mount.h>
@@ -760,6 +761,17 @@ ssize_t ksys_pread64(unsigned int fd, char __user *buf, size_t count,
 	f = fdget(fd);
 	if (fd_file(f)) {
 		ret = -ESPIPE;
+
+		/*
+		 * If userspace thinks the pages are larger than they actually are,
+		 * adjust the offset and count to compensate.
+		 *
+		 * NOTE: We only need to adjust the position here since pagemap_read()
+		 * handles updating the count.
+		 */
+		if (__is_emulated_pagemap_file(fd_file(f)))
+			pos *= __PAGE_SIZE / PAGE_SIZE;
+
 		if (fd_file(f)->f_mode & FMODE_PREAD)
 			ret = vfs_read(fd_file(f), buf, count, &pos);
 		fdput(f);
@@ -1830,18 +1842,21 @@ int generic_file_rw_checks(struct file *file_in, struct file *file_out)
 	return 0;
 }
 
-bool generic_atomic_write_valid(struct iov_iter *iter, loff_t pos)
+int generic_atomic_write_valid(struct kiocb *iocb, struct iov_iter *iter)
 {
 	size_t len = iov_iter_count(iter);
 
 	if (!iter_is_ubuf(iter))
-		return false;
+		return -EINVAL;
 
 	if (!is_power_of_2(len))
-		return false;
+		return -EINVAL;
 
-	if (!IS_ALIGNED(pos, len))
-		return false;
+	if (!IS_ALIGNED(iocb->ki_pos, len))
+		return -EINVAL;
 
-	return true;
+	if (!(iocb->ki_flags & IOCB_DIRECT))
+		return -EOPNOTSUPP;
+
+	return 0;
 }

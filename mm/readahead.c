@@ -128,6 +128,7 @@
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
 #include <linux/sched/mm.h>
+#include <trace/hooks/mm.h>
 
 #include "internal.h"
 
@@ -142,6 +143,15 @@ file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 	ra->prev_pos = -1;
 }
 EXPORT_SYMBOL_GPL(file_ra_state_init);
+
+gfp_t readahead_gfp_mask(struct address_space *x)
+{
+	gfp_t mask = __readahead_gfp_mask(x);
+
+	trace_android_rvh_set_readahead_gfp_mask(&mask);
+	return mask;
+}
+EXPORT_SYMBOL_GPL(readahead_gfp_mask);
 
 static void read_pages(struct readahead_control *rac)
 {
@@ -260,6 +270,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			continue;
 		}
 
+		trace_android_vh_io_statistics(mapping, index + i, 1, true, false);
 		folio = filemap_alloc_folio(gfp_mask,
 					    mapping_min_folio_order(mapping));
 		if (!folio)
@@ -453,8 +464,7 @@ void page_cache_ra_order(struct readahead_control *ractl,
 		struct file_ra_state *ra, unsigned int new_order)
 {
 	struct address_space *mapping = ractl->mapping;
-	pgoff_t start = readahead_index(ractl);
-	pgoff_t index = start;
+	pgoff_t index = readahead_index(ractl);
 	unsigned int min_order = mapping_min_folio_order(mapping);
 	pgoff_t limit = (i_size_read(mapping->host) - 1) >> PAGE_SHIFT;
 	pgoff_t mark = index + ra->size - ra->async_size;
@@ -462,12 +472,18 @@ void page_cache_ra_order(struct readahead_control *ractl,
 	int err = 0;
 	gfp_t gfp = readahead_gfp_mask(mapping);
 	unsigned int min_ra_size = max(4, mapping_min_folio_nrpages(mapping));
+	bool bypass = false;
 
 	/*
 	 * Fallback when size < min_nrpages as each folio should be
 	 * at least min_nrpages anyway.
 	 */
 	if (!mapping_large_folio_support(mapping) || ra->size < min_ra_size)
+		goto fallback;
+
+	trace_android_vh_page_cache_ra_order_bypass(ractl, ra, new_order, &gfp,
+						    &bypass);
+	if (bypass)
 		goto fallback;
 
 	limit = min(limit, index + ra->size - 1);
@@ -517,7 +533,7 @@ void page_cache_ra_order(struct readahead_control *ractl,
 	if (!err)
 		return;
 fallback:
-	do_page_cache_ra(ractl, ra->size - (index - start), ra->async_size);
+	do_page_cache_ra(ractl, ra->size, ra->async_size);
 }
 
 static unsigned long ractl_max_pages(struct readahead_control *ractl,
@@ -532,6 +548,9 @@ static unsigned long ractl_max_pages(struct readahead_control *ractl,
 	 */
 	if (req_size > max_pages && bdi->io_pages > max_pages)
 		max_pages = min(req_size, bdi->io_pages);
+
+	trace_android_vh_ra_tuning_max_page(ractl, &max_pages);
+
 	return max_pages;
 }
 
@@ -642,7 +661,11 @@ void page_cache_async_ra(struct readahead_control *ractl,
 			1UL << order);
 	if (index == expected) {
 		ra->start += ra->size;
-		ra->size = get_next_ra_size(ra, max_pages);
+		/*
+		 * In the case of MADV_HUGEPAGE, the actual size might exceed
+		 * the readahead window.
+		 */
+		ra->size = max(ra->size, get_next_ra_size(ra, max_pages));
 		ra->async_size = ra->size;
 		goto readit;
 	}

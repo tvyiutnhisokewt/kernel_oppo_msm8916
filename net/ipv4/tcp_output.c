@@ -48,6 +48,7 @@
 #include <linux/skbuff_ref.h>
 
 #include <trace/events/tcp.h>
+#include <trace/hooks/net.h>
 
 /* Refresh clocks of a TCP socket,
  * ensuring monotically increasing values.
@@ -265,14 +266,20 @@ static u16 tcp_select_window(struct sock *sk)
 	u32 cur_win, new_win;
 
 	/* Make the window 0 if we failed to queue the data because we
-	 * are out of memory. The window is temporary, so we don't store
-	 * it on the socket.
+	 * are out of memory.
 	 */
-	if (unlikely(inet_csk(sk)->icsk_ack.pending & ICSK_ACK_NOMEM))
+	if (unlikely(inet_csk(sk)->icsk_ack.pending & ICSK_ACK_NOMEM)) {
+		tp->pred_flags = 0;
+		tp->rcv_wnd = 0;
+		tp->rcv_wup = tp->rcv_nxt;
 		return 0;
+	}
 
 	cur_win = tcp_receive_window(tp);
 	new_win = __tcp_select_window(sk);
+
+	trace_android_vh_tcp_select_window(sk, &new_win);
+
 	if (new_win < cur_win) {
 		/* Danger Will Robinson!
 		 * Don't update rcv_wup/rcv_wnd here or else
@@ -291,6 +298,8 @@ static u16 tcp_select_window(struct sock *sk)
 
 	tp->rcv_wnd = new_win;
 	tp->rcv_wup = tp->rcv_nxt;
+
+	trace_android_rvh_tcp_select_window(sk, &new_win);
 
 	/* Make sure we do not exceed the maximum possible
 	 * scaled window.
@@ -883,8 +892,10 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		unsigned int size;
 
 		if (mptcp_syn_options(sk, skb, &size, &opts->mptcp)) {
-			opts->options |= OPTION_MPTCP;
-			remaining -= size;
+			if (remaining >= size) {
+				opts->options |= OPTION_MPTCP;
+				remaining -= size;
+			}
 		}
 	}
 
@@ -3651,6 +3662,7 @@ void tcp_send_active_reset(struct sock *sk, gfp_t priority,
 	 */
 	trace_tcp_send_reset(sk, NULL, reason);
 }
+EXPORT_SYMBOL_GPL(tcp_send_active_reset);
 
 /* Send a crossed SYN-ACK during socket establishment.
  * WARNING: This routine must only be called when we have already sent
@@ -4149,6 +4161,9 @@ int tcp_connect(struct sock *sk)
 	 */
 	WRITE_ONCE(tp->snd_nxt, tp->write_seq);
 	tp->pushed_seq = tp->write_seq;
+
+	trace_android_vh_tcp_connect(buff);
+
 	buff = tcp_send_head(sk);
 	if (unlikely(buff)) {
 		WRITE_ONCE(tp->snd_nxt, TCP_SKB_CB(buff)->seq);
